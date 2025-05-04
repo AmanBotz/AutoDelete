@@ -1,96 +1,55 @@
-import asyncio
-import os
+import asyncio, os, aiohttp, threading
 from flask import Flask
 from motor.motor_asyncio import AsyncIOMotorClient
 from pyrogram import Client, filters, enums
-from pyrogram.types import Message
 
-# Load environment variables
 API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 MONGO_URI = os.getenv("MONGO_URI")
+PING_URL = os.getenv("PING_URL", "https://example.com")
 SESSION_NAME = os.getenv("SESSION_NAME", "autodeleter_bot")
 
-# MongoDB setup
-mongo_client = AsyncIOMotorClient(MONGO_URI)
-db = mongo_client["autodeleter"]
-settings_collection = db["settings"]
-
-# Pyrogram client
+db = AsyncIOMotorClient(MONGO_URI)["autodeleter"]
 app = Client(SESSION_NAME, api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
-
-# Flask server
 flask_app = Flask(__name__)
 
 @flask_app.route("/")
-def home():
-    return "Auto Deleter Bot is running."
+def home(): return "Running"
 
-# Schedule deletion
-async def schedule_deletion(chat_id: int, message_id: int, delay: int):
-    await asyncio.sleep(delay)
-    try:
-        await app.delete_messages(chat_id, message_id)
-    except Exception as e:
-        print(f"[ERROR] Failed to delete message {message_id} in chat {chat_id}: {e}")
+async def ping():
+    async with aiohttp.ClientSession() as s:
+        while True:
+            try: await s.get(PING_URL)
+            except: pass
+            await asyncio.sleep(30)
 
-# Check admin status using enums.ChatMembersFilter.ADMINISTRATORS
-async def is_admin(chat_id: int, user_id: int) -> bool:
-    try:
-        async for member in app.get_chat_members(chat_id, filter=enums.ChatMembersFilter.ADMINISTRATORS):
-            if member.user.id == user_id:
-                return True
-        return False
-    except Exception as e:
-        print(f"Error checking admin status: {e}")
-        return False
+async def is_admin(chat_id, user_id):
+    async for m in app.get_chat_members(chat_id, filter=enums.ChatMembersFilter.ADMINISTRATORS):
+        if m.user.id == user_id: return True
+    return False
 
-# Set delay command
+@app.on_message(filters.command("start") & filters.private)
+async def start(c, m):
+    await m.reply("Hello! I'm Auto Deleter Bot.\n\nAdd me to your group as admin and use /setdelay <seconds> to control how long messages stay.")
+
 @app.on_message(filters.command("setdelay") & filters.group)
-async def set_delay(client: Client, message: Message):
-    if not message.from_user:
-        return
+async def set_delay(c, m):
+    if not m.from_user or not await is_admin(m.chat.id, m.from_user.id): return
+    try: d = int(m.text.split()[1])
+    except: return await m.reply("Usage: /setdelay <seconds>")
+    await db.settings.update_one({"chat_id": m.chat.id}, {"$set": {"delay": d}}, upsert=True)
+    await m.reply(f"Delay set to {d}s")
 
-    user_id = message.from_user.id
-    chat_id = message.chat.id
-
-    if not await is_admin(chat_id, user_id):
-        await message.reply("Only admins can set the deletion delay.")
-        return
-
-    try:
-        delay = int(message.text.split()[1])
-        if delay < 0:
-            raise ValueError
-    except (IndexError, ValueError):
-        await message.reply("Usage: /setdelay <seconds> (non-negative integer)")
-        return
-
-    await settings_collection.update_one(
-        {"chat_id": chat_id},
-        {"$set": {"delay": delay}},
-        upsert=True
-    )
-
-    await message.reply(f"Message deletion delay set to {delay} seconds.")
-
-# Handle all messages in groups (excluding service messages)
 @app.on_message(filters.group & ~filters.service)
-async def handle_message(client: Client, message: Message):
-    chat_id = message.chat.id
-    msg_id = message.id
-
-    setting = await settings_collection.find_one({"chat_id": chat_id})
-    delay = setting["delay"] if setting and "delay" in setting else 5  # default to 5 seconds
-
-    asyncio.create_task(schedule_deletion(chat_id, msg_id, delay))
+async def delete_later(c, m):
+    d = 5
+    s = await db.settings.find_one({"chat_id": m.chat.id})
+    if s and "delay" in s: d = s["delay"]
+    await asyncio.sleep(d)
+    try: await c.delete_messages(m.chat.id, m.id)
+    except: pass
 
 if __name__ == "__main__":
-    import threading
-
-    def run_flask():
-        flask_app.run(host="0.0.0.0", port=8000)
-
-    threading.Thread(target=run_flask).start()
-    app.run()
+    threading.Thread(target=lambda: flask_app.run(host="0.0.0.0", port=8000)).start()
+    asyncio.run(asyncio.gather(app.start(), ping(), app.idle()))
