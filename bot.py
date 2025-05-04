@@ -1,7 +1,5 @@
 import asyncio
 import os
-from datetime import datetime
-
 from flask import Flask
 from motor.motor_asyncio import AsyncIOMotorClient
 from pyrogram import Client, filters
@@ -14,15 +12,15 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 MONGO_URI = os.getenv("MONGO_URI")
 SESSION_NAME = os.getenv("SESSION_NAME", "autodeleter_bot")
 
-# MongoDB setup
+# Initialize MongoDB client
 mongo_client = AsyncIOMotorClient(MONGO_URI)
 db = mongo_client["autodeleter"]
 settings_collection = db["settings"]
 
-# Pyrogram client
+# Initialize Pyrogram client
 app = Client(SESSION_NAME, api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
-# Flask server
+# Initialize Flask app
 flask_app = Flask(__name__)
 
 @flask_app.route("/")
@@ -47,8 +45,9 @@ async def set_delay(client: Client, message: Message):
     chat_id = message.chat.id
 
     try:
-        member = await client.get_chat_member(chat_id, user_id)
-        if member.status not in ("administrator", "creator"):
+        admins = await client.get_chat_administrators(chat_id)
+        admin_ids = [admin.user.id for admin in admins]
+        if user_id not in admin_ids:
             await message.reply("Only admins can set the deletion delay.")
             return
     except Exception as e:
@@ -78,10 +77,9 @@ async def handle_message(client: Client, message: Message):
     msg_id = message.id
 
     setting = await settings_collection.find_one({"chat_id": chat_id})
-    delay = setting["delay"] if setting and "delay" in setting else None
+    delay = setting["delay"] if setting and "delay" in setting else 5  # Default delay of 5 seconds
 
-    if delay is not None:
-        asyncio.create_task(schedule_deletion(chat_id, msg_id, delay))
+    asyncio.create_task(schedule_deletion(chat_id, msg_id, delay))
 
 if __name__ == "__main__":
     import threading
