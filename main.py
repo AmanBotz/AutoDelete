@@ -6,7 +6,7 @@ from threading import Thread
 from config import API_ID, API_HASH, BOT_TOKEN
 from deleter import process_queue
 from pinger import keep_alive
-import handlers  # Ensures message handlers are registered
+import handlers
 
 app = Flask(__name__)
 
@@ -20,15 +20,15 @@ def run_flask():
 bot = Client("autodeleter", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
 async def start_all():
+    Thread(target=run_flask).start()
     await bot.start()
-    print("Bot is running...")
+    me = await bot.get_me()
+    print(f"Bot started as @{me.username}")
     asyncio.create_task(process_queue())
     asyncio.create_task(keep_alive())
 
-    # Keep the program alive
     while True:
         await asyncio.sleep(3600)
 
 if __name__ == "__main__":
-    Thread(target=run_flask).start()
     asyncio.run(start_all())
