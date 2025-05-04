@@ -1,8 +1,6 @@
-fastapi
-uvicorn[standard]
+# requirements.txt
 pyrogram
 tgcrypto
 motor
-apscheduler
-httpx
-python-dotenv
+flask
+aiohttp
