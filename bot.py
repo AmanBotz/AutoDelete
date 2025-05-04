@@ -1,20 +1,20 @@
 import os
 import asyncio
 import threading
-from flask import Flask
 import requests
-from pyrogram import Client, filters, enums, idle
+from flask import Flask
+from pyrogram import Client, filters, enums
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from motor.motor_asyncio import AsyncIOMotorClient
 
 app = Flask(__name__)
-API_ID = os.environ.get('API_ID')
-API_HASH = os.environ.get('API_HASH')
-BOT_TOKEN = os.environ.get('BOT_TOKEN')
-MONGO_URI = os.environ.get('MONGO_URI')
-PING_URL = os.environ.get('PING_URL')
+API_ID = int(os.environ["API_ID"])
+API_HASH = os.environ["API_HASH"]
+BOT_TOKEN = os.environ["BOT_TOKEN"]
+MONGO_URI = os.environ["MONGO_URI"]
+PING_URL = os.environ["PING_URL"]
 
-bot = Client("bot", API_ID, API_HASH, bot_token=BOT_TOKEN)
+bot = Client("auto_delete_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 mongo = AsyncIOMotorClient(MONGO_URI)
 db = mongo.auto_delete_bot
 
@@ -41,8 +41,7 @@ def ping_server():
 
 async def run_client():
     await bot.start()
-    await idle()
-    await bot.stop()
+    await bot.idle()
 
 def run_bot():
     loop = asyncio.new_event_loop()
@@ -50,104 +49,107 @@ def run_bot():
     loop.run_until_complete(run_client())
 
 @bot.on_message(filters.command("start"))
-async def start(client, message: Message):
-    keyboard = InlineKeyboardMarkup([[
-        InlineKeyboardButton("Add to Group", url=f"t.me/{client.me.username}?startgroup=true"),
-        InlineKeyboardButton("List Chats", callback_data="list_chats")
-    ]])
-    await message.reply("**Auto-Delete Bot**\nConfigure deletion delays:", reply_markup=keyboard)
+async def start(_, message: Message):
+    me = await bot.get_me()
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("Add to Group", url=f"https://t.me/{me.username}?startgroup=true")],
+        [InlineKeyboardButton("Settings", callback_data="settings")]
+    ])
+    await message.reply("Auto-Delete Bot\nConfigure deletion delays:", reply_markup=keyboard)
 
-@bot.on_message(filters.command("settings"))
-async def settings(client, message: Message):
-    keyboard = InlineKeyboardMarkup([[
-        InlineKeyboardButton("User Messages", callback_data="set_delay user_msg"),
-        InlineKeyboardButton("Bot Messages", callback_data="set_delay bot_msg")
-    ]])
-    await message.reply("Configure deletion delays:", reply_markup=keyboard)
-
-@bot.on_callback_query(filters.regex(r"^list_chats"))
-async def list_chats(client, query: CallbackQuery):
-    chats = await db.chats.find().to_list(None)
-    text = "**Active Chats:**\n" + "\n".join([f"- `{chat['chat_id']}`" for chat in chats])
-    await query.message.edit(text)
+@bot.on_callback_query(filters.regex(r"^settings$"))
+async def settings(_, query: CallbackQuery):
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("User Messages", callback_data="set_delay user_msg")],
+        [InlineKeyboardButton("Bot Messages", callback_data="set_delay bot_msg")],
+        [InlineKeyboardButton("Cancel", callback_data="cancel")]
+    ])
+    await query.message.edit("Select option:", reply_markup=keyboard)
 
 @bot.on_callback_query(filters.regex(r"^set_delay"))
-async def set_delay(client, query: CallbackQuery):
-    target = query.data.split()[1]
+async def set_delay(_, query: CallbackQuery):
+    _, target = query.data.split()
     keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton(unit, callback_data=f"unit {target} {unit}") for unit in ["seconds", "minutes", "hours", "days", "weeks"]],
-        [InlineKeyboardButton("⏮ Cancel", callback_data="cancel")]
+        [InlineKeyboardButton(u, callback_data=f"set_unit {target} {u}") for u in ["seconds","minutes","hours","days","weeks"]],
+        [InlineKeyboardButton("Cancel", callback_data="cancel")]
     ])
     await query.message.edit("Select time unit:", reply_markup=keyboard)
 
-@bot.on_callback_query(filters.regex(r"^unit"))
-async def set_unit(client, query: CallbackQuery):
+@bot.on_callback_query(filters.regex(r"^set_unit"))
+async def set_unit(_, query: CallbackQuery):
     _, target, unit = query.data.split()
-    chat = await get_chat(query.message.chat.id)
-    default = 3 if target == "user_msg" else 120
-    current = chat.get(f"{target}_delay", default)
+    chat = await get_chat(query.message.chat.id) or {}
+    key = f"{target}_delay"
+    current = chat.get(key, 3 if target == "user_msg" else 120)
     keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"-1 {unit}", callback_data=f"adjust {target} {unit} -1"),
-         InlineKeyboardButton(f"+1 {unit}", callback_data=f"adjust {target} {unit} +1")],
+        [
+            InlineKeyboardButton(f"-1 {unit}", callback_data=f"adjust {target} {unit} -1"),
+            InlineKeyboardButton(f"+1 {unit}", callback_data=f"adjust {target} {unit} +1")
+        ],
         [InlineKeyboardButton(f"Current: {current} sec", callback_data="none")],
-        [InlineKeyboardButton("✅ Confirm", callback_data=f"confirm {target} {unit}"),
-         InlineKeyboardButton("⏮ Cancel", callback_data="cancel")]
+        [
+            InlineKeyboardButton("Confirm", callback_data=f"confirm {target} {unit}"),
+            InlineKeyboardButton("Cancel", callback_data="cancel")
+        ]
     ])
     await query.message.edit("Adjust delay:", reply_markup=keyboard)
 
 @bot.on_callback_query(filters.regex(r"^adjust"))
-async def adjust_delay(client, query: CallbackQuery):
+async def adjust(_, query: CallbackQuery):
     _, target, unit, direction = query.data.split()
-    chat = await get_chat(query.message.chat.id)
-    default = 3 if target == "user_msg" else 120
-    current = chat.get(f"{target}_delay", default)
-    delta = 1 if direction == "+1" else -1
+    chat_id = query.message.chat.id
+    chat = await get_chat(chat_id) or {}
+    key = f"{target}_delay"
+    current = chat.get(key, 3 if target == "user_msg" else 120)
     multiplier = {"seconds":1,"minutes":60,"hours":3600,"days":86400,"weeks":604800}[unit]
-    new_delay = max(1, current + (delta * multiplier))
-    await update_chat(query.message.chat.id, {f"{target}_delay": new_delay})
-    await set_unit(client, query)
+    new = max(1, current + int(direction) * multiplier)
+    await update_chat(chat_id, {key: new})
+    await set_unit(_, query)
 
 @bot.on_callback_query(filters.regex(r"^confirm"))
-async def confirm_delay(client, query: CallbackQuery):
+async def confirm(_, query: CallbackQuery):
     await query.message.edit("Delay updated!")
 
 @bot.on_callback_query(filters.regex(r"^cancel"))
-async def cancel(client, query: CallbackQuery):
+async def cancel(_, query: CallbackQuery):
     await query.message.delete()
 
 @bot.on_message(filters.group | filters.channel)
-async def track_message(client, message: Message):
+async def track(_, message: Message):
     chat = await get_chat(message.chat.id)
     if not chat:
         return
-    delay = chat["bot_msg_delay"] if message.from_user and message.from_user.is_bot else chat["user_msg_delay"]
+    if message.from_user and message.from_user.is_bot:
+        delay = chat.get("bot_msg_delay", 120)
+    else:
+        delay = chat.get("user_msg_delay", 3)
     asyncio.create_task(delete_message(message.chat.id, message.id, delay))
 
 @bot.on_chat_member_updated()
-async def chat_member_update(client, update):
-    if update.new_chat_member and update.new_chat_member.user.id == (await client.get_me()).id:
+async def chat_member(_, update):
+    if update.new_chat_member and update.new_chat_member.user.id == (await bot.get_me()).id:
         try:
             member = await update.chat.get_member(update.from_user.id)
             if member.status not in [enums.ChatMemberStatus.ADMINISTRATOR, enums.ChatMemberStatus.OWNER]:
                 return
         except:
             return
-        perms = await update.chat.get_member((await client.get_me()).id)
+        perms = await update.chat.get_member((await bot.get_me()).id)
         if not perms.privileges.can_delete_messages:
-            await client.send_message(update.chat.id, "⚠️ Please grant me message deletion permissions!")
+            await bot.send_message(update.chat.id, "⚠️ Please grant me message deletion permissions!")
             return
         await update_chat(update.chat.id, {"user_msg_delay": 3, "bot_msg_delay": 120})
-        await client.send_message(update.from_user.id, f"Bot added to {update.chat.title}\nConfigure with /settings")
+        await bot.send_message(update.from_user.id, f"Bot added to {update.chat.title}\nConfigure with /settings")
 
-@app.route('/')
+@app.route("/")
 def home():
     return "Bot Running"
 
-@app.route('/ping')
+@app.route("/ping")
 def ping():
     return "PONG"
 
 if __name__ == "__main__":
     threading.Thread(target=run_bot, daemon=True).start()
     threading.Thread(target=ping_server, daemon=True).start()
-    app.run(host='0.0.0.0', port=8080)
+    app.run(host="0.0.0.0", port=8080)
