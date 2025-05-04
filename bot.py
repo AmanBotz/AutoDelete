@@ -1,149 +1,155 @@
 import os
-import asyncio
-from threading import Thread
+import time
+import threading
+from flask import Flask
 from pyrogram import Client, filters
-from pyrogram.types import (
-    InlineKeyboardMarkup,
-    InlineKeyboardButton,
-    CallbackQuery,
-    ChatMemberUpdated
-)
-from flask import Flask, request, jsonify
+from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
 from pymongo import MongoClient
-import aiohttp
+from datetime import datetime, timedelta
 
-# Environment
-API_ID = int(os.getenv("API_ID"))
-API_HASH = os.getenv("API_HASH")
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-MONGO_URI = os.getenv("MONGO_URI")
-PING_URL = os.getenv("PING_URL")
-PING_INTERVAL = int(os.getenv("PING_INTERVAL", 30))
+API_ID = int(os.getenv("API_ID", "YOUR_API_ID"))
+API_HASH = os.getenv("API_HASH", "YOUR_API_HASH")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN")
+MONGO_URI = os.getenv("MONGO_URI", "YOUR_MONGODB_URI")
+PING_URL = os.getenv("PING_URL", "https://yoururl.com")
 
-# MongoDB
+app = Client("autodelete_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 mongo = MongoClient(MONGO_URI)
-db = mongo['auto_delete_bot']
-settings_col = db['settings']
-chats_col = db['chats']
-user_ctx = db['user_context']
+db = mongo.autodelete
+chats_col = db.chats
+users_col = db.users
 
-# Pyrogram & Flask
-app = Client("auto_delete_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
-server = Flask(__name__)
+flask_app = Flask(__name__)
+selected_chats = {}
 
-def get_settings(chat_id: str):
-    doc = settings_col.find_one({"_id": chat_id})
-    return {"user": doc.get("user", 0), "bot": doc.get("bot", 0)} if doc else {"user": 0, "bot": 0}
+@flask_app.route("/")
+def home():
+    return "Bot is alive!"
 
-def set_settings(chat_id: str, user_delay=None, bot_delay=None):
-    update = {}
-    if user_delay is not None: update['user'] = user_delay
-    if bot_delay is not None: update['bot'] = bot_delay
-    settings_col.update_one({"_id": chat_id}, {"$set": update}, upsert=True)
+def run_flask():
+    flask_app.run(host="0.0.0.0", port=8080)
 
-def parse_delay(text: str) -> int:
-    num = int(text[:-1])
-    unit = text[-1]
-    if unit == 's': return num
-    if unit == 'm': return num * 60
-    if unit == 'h': return num * 3600
-    if unit == 'd': return num * 86400
-    if unit == 'w': return num * 7 * 86400
-    if unit == 'M': return num * 30 * 86400
-    if unit == 'y': return num * 365 * 86400
-    raise ValueError
+def pinger():
+    while True:
+        try:
+            import requests
+            requests.get(PING_URL)
+        except:
+            pass
+        time.sleep(30)
 
-@app.on_message(filters.command("start") & filters.private)
-async def start_cmd(c, m):
-    bot = await c.get_me()
+@app.on_message(filters.private & filters.command("start"))
+async def start(client, message: Message):
+    users_col.update_one({"_id": message.from_user.id}, {"$set": {"last_seen": datetime.utcnow()}}, upsert=True)
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("➕ Add me to Group", url=f"https://t.me/{client.me.username}?startgroup=start")],
+        [InlineKeyboardButton("➕ Add me to Channel", url=f"https://t.me/{client.me.username}?startchannel=start")],
+        [InlineKeyboardButton("📂 List My Chats", callback_data="list_chats")]
+    ])
+    await message.reply("Welcome! I can auto-delete messages from any group or channel after a delay. First, add me and give **Delete Messages** permission.", reply_markup=kb)
+
+@app.on_callback_query(filters.regex("list_chats"))
+async def list_chats(client, cb):
+    user_id = cb.from_user.id
+    chats = chats_col.find({"admins": user_id})
+    buttons = []
+    for chat in chats:
+        title = chat.get("title", str(chat["_id"]))
+        buttons.append([InlineKeyboardButton(title, callback_data=f"chat_{chat['_id']}")])
+    if not buttons:
+        await cb.answer("No chats found where you're an admin.")
+        return
+    await cb.message.edit("Select a chat to configure:", reply_markup=InlineKeyboardMarkup(buttons))
+
+@app.on_callback_query(filters.regex(r"chat_"))
+async def select_chat(client, cb):
+    chat_id = int(cb.data.split("_", 1)[1])
+    selected_chats[cb.from_user.id] = chat_id
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("Set User Msg Delay", callback_data="set_user")],
+        [InlineKeyboardButton("Set Bot Msg Delay", callback_data="set_bot")],
+        [InlineKeyboardButton("Reset Settings", callback_data="reset")],
+        [InlineKeyboardButton("Back", callback_data="list_chats")]
+    ])
+    await cb.message.edit(f"✅ Selected chat: `{chat_id}`\nNow choose what you want to configure:", reply_markup=kb)
+
+@app.on_callback_query(filters.regex("reset"))
+async def reset_settings(client, cb):
+    user_id = cb.from_user.id
+    chat_id = selected_chats.get(user_id)
+    if not chat_id:
+        await cb.answer("No chat selected.")
+        return
+    chats_col.update_one({"_id": chat_id}, {"$unset": {"user_delay": "", "bot_delay": ""}})
+    await cb.answer("Reset done.")
+    await cb.message.edit("Settings have been reset.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="list_chats")]]))
+
+@app.on_callback_query(filters.regex("set_(user|bot)"))
+async def set_delay_menu(client, cb):
+    typ = cb.data.split("_")[1]
     buttons = [
-        [InlineKeyboardButton("➕ Add to a Group", url=f"https://t.me/{bot.username}?startgroup=true")],
-        [InlineKeyboardButton("➕ Add to a Channel", url=f"https://t.me/{bot.username}?startchannel=true")],
-        [InlineKeyboardButton("📋 List my Chats", callback_data="listchats")]
+        [InlineKeyboardButton("10s", callback_data=f"delay_{typ}_10s"), InlineKeyboardButton("1m", callback_data=f"delay_{typ}_1m")],
+        [InlineKeyboardButton("5m", callback_data=f"delay_{typ}_5m"), InlineKeyboardButton("1h", callback_data=f"delay_{typ}_1h")],
+        [InlineKeyboardButton("1d", callback_data=f"delay_{typ}_1d"), InlineKeyboardButton("1w", callback_data=f"delay_{typ}_1w")],
+        [InlineKeyboardButton("1M", callback_data=f"delay_{typ}_1M"), InlineKeyboardButton("1y", callback_data=f"delay_{typ}_1y")],
+        [InlineKeyboardButton("Back", callback_data="list_chats")]
     ]
-    text = (
-        "👋 Welcome! I'm AutoDelete Bot.\n"
-        "• I remove user and bot messages after a delay you set.\n"
-        "• Supported units: s=seconds, m=minutes, h=hours, d=days, w=weeks, M=months, y=years.\n"
-        "• In private chat, list and select a chat via the button, then configure with /setdelay_user or /setdelay_bot."
-    )
-    await m.reply(text, reply_markup=InlineKeyboardMarkup(buttons))
+    await cb.message.edit("Choose delay time:", reply_markup=InlineKeyboardMarkup(buttons))
 
-@app.on_chat_member()
-async def on_my_chat_member(c, chat_member: ChatMemberUpdated):
-    if chat_member.new_chat_member.status in ["member", "administrator"]:
-        chat_id = str(chat_member.chat.id)
-        title = chat_member.chat.title or chat_member.chat.username or chat_id
-        chats_col.update_one({"_id": chat_id}, {"$set": {"title": title, "username": chat_member.chat.username}}, upsert=True)
-        button = InlineKeyboardMarkup([[InlineKeyboardButton("⚙ Configure this chat", callback_data=f"select_{chat_id}")]])
-        await c.send_message(chat_id, f"🤖 I've been added to **{title}**. Configure delays now:", reply_markup=button, parse_mode="Markdown")
-        adder = chat_member.from_user
-        if adder:
+def parse_duration(duration: str) -> int:
+    unit = duration[-1]
+    val = int(duration[:-1])
+    mapping = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800, "M": 2592000, "y": 31536000}
+    return val * mapping.get(unit, 0)
+
+@app.on_callback_query(filters.regex(r"delay_(user|bot)_"))
+async def set_delay(client, cb):
+    typ, dur = cb.data.split("_")[1:]
+    user_id = cb.from_user.id
+    chat_id = selected_chats.get(user_id)
+    if not chat_id:
+        await cb.answer("No chat selected.")
+        return
+    seconds = parse_duration(dur)
+    field = "user_delay" if typ == "user" else "bot_delay"
+    chats_col.update_one({"_id": chat_id}, {"$set": {field: seconds}}, upsert=True)
+    await cb.message.edit(f"✅ {typ.capitalize()} message delay set to {dur} for chat `{chat_id}`.")
+
+@app.on_chat_member_updated()
+async def on_added(client, update):
+    if update.new_chat_member and update.new_chat_member.user.id == client.me.id:
+        chat = await client.get_chat(update.chat.id)
+        title = chat.title or "Unknown"
+        admins = [m.user.id async for m in client.get_chat_members(chat.id, filter="administrators") if m.status == "administrator"]
+        chats_col.update_one({"_id": chat.id}, {"$set": {"title": title, "admins": admins}}, upsert=True)
+        try:
+            await client.send_message(chat.id, "Thanks for adding me! Please give me 'Delete messages' permission.")
+        except:
+            pass
+        for uid in admins:
             try:
-                await c.send_message(adder.id, f"👋 You added me to **{title}**. Use 'List my Chats' in /start to configure.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📋 List my Chats", callback_data="listchats")]]), parse_mode="Markdown")
+                await client.send_message(uid, f"I'm added to `{title}` (`{chat.id}`)\nSelect it via 'List My Chats' to configure auto-delete.")
             except:
                 pass
 
-@app.on_callback_query()
-async def handle_cb(c, cb: CallbackQuery):
-    data = cb.data; user_id = str(cb.from_user.id)
-    if data == "listchats":
-        chats = list(chats_col.find({}))
-        if not chats:
-            return await cb.answer("No chats found. Send a message in your group/channel.", show_alert=True)
-        kb = [[InlineKeyboardButton(ch.get('title') or ch['_id'], callback_data=f"select_{ch['_id']}")] for ch in chats]
-        await cb.message.edit("Select a chat to configure:", reply_markup=InlineKeyboardMarkup(kb))
-    elif data.startswith("select_"):
-        chat_id = data.split("_")[1]
-        user_ctx.update_one({"_id": user_id}, {"$set": {"chat_id": chat_id}}, upsert=True)
-        await cb.message.edit(f"✅ Selected chat: **{chat_id}**\nNow send /setdelay_user or /setdelay_bot in this private chat.", parse_mode="Markdown")
-
-@app.on_message(filters.command(["setdelay_user", "setdelay_bot"]) & filters.private)
-async def set_delay_pm(c, m):
-    user_id = str(m.from_user.id)
-    ctx = user_ctx.find_one({"_id": user_id})
-    if not ctx or 'chat_id' not in ctx:
-        return await m.reply("⚠️ No chat selected. Tap 'List my Chats' first.", parse_mode="Markdown")
-    chat_id = ctx['chat_id']; cmd = m.command[0]; arg = m.command[1] if len(m.command)>1 else None
-    try: delay = parse_delay(arg)
-    except: return await m.reply(f"🚫 Invalid. Usage: /{cmd} <number><unit>, e.g. /{cmd} 2w")
-    if cmd=="setdelay_user": set_settings(chat_id, user_delay=delay)
-    else: set_settings(chat_id, bot_delay=delay)
-    await m.reply(f"✅ `{cmd}` for **{chat_id}**: delete after {arg}.", parse_mode="Markdown")
-
-async def schedule_deletion(c, m, delay):
-    await asyncio.sleep(delay)
-    try: await c.delete_messages(chat_id=m.chat.id, message_ids=m.message_id)
-    except: pass
-
 @app.on_message(filters.group | filters.channel)
-async def auto_delete(c, m):
-    chats_col.update_one({"_id": str(m.chat.id)}, {"$set": {"title": m.chat.title, "username": m.chat.username}}, upsert=True)
-    conf = get_settings(str(m.chat.id))
-    delay = conf['bot'] if m.from_user and m.from_user.is_bot else conf['user']
-    if delay>0: asyncio.create_task(schedule_deletion(c, m, delay))
+async def auto_delete_handler(client, message: Message):
+    if not message.chat or message.from_user is None:
+        return
+    data = chats_col.find_one({"_id": message.chat.id}) or {}
+    delay = 0
+    if message.from_user.id == client.me.id:
+        delay = data.get("bot_delay", 0)
+    else:
+        delay = data.get("user_delay", 0)
+    if delay > 0:
+        try:
+            await asyncio.sleep(delay)
+            await message.delete()
+        except:
+            pass
 
-@server.route('/set_ping', methods=['POST'])
-def set_ping():
-    data = request.json or {}
-    global PING_URL, PING_INTERVAL
-    if 'url' in data: PING_URL = data['url']
-    if 'interval' in data: PING_INTERVAL = int(data['interval'])
-    return jsonify({"PING_URL": PING_URL, "PING_INTERVAL": PING_INTERVAL})
-
-def start_ping_loop():
-    async def loop():
-        async with aiohttp.ClientSession() as session:
-            while True:
-                try: await session.get(PING_URL)
-                except: pass
-                await asyncio.sleep(PING_INTERVAL)
-    asyncio.get_event_loop().create_task(loop())
-
-def start_flask():
-    server.run(host='0.0.0.0', port=int(os.getenv('PORT', 5000)))
-
-if __name__ == '__main__':
-    start_ping_loop()
-    Thread(target=start_flask, daemon=True).start()
+if __name__ == "__main__":
+    threading.Thread(target=run_flask).start()
+    threading.Thread(target=pinger).start()
     app.run()
