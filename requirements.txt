@@ -1,6 +1,5 @@
-# requirements.txt
-pyrogram
-tgcrypto
-motor
 flask
-aiohttp
+pyrogram
+motor
+requests
+python-dotenv
