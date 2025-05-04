@@ -1,83 +1,88 @@
 import os
 import asyncio
-import time
+from datetime import datetime, timedelta
 from threading import Thread
-from queue import Queue
-from pymongo import MongoClient
+
+from flask import Flask
 from pyrogram import Client, filters
 from pyrogram.types import Message
-from flask import Flask
+from pyrogram.errors import FloodWait
+from mongoengine import connect, Document, StringField, IntField
 
-# Configuration
-API_ID = os.getenv('API_ID')
-API_HASH = os.getenv('API_HASH')
-BOT_TOKEN = os.getenv('BOT_TOKEN')
-MONGO_URI = os.getenv('MONGO_URI')
+app = Flask(__name__)
+app.debug = False
 
-# MongoDB Setup
-mongo = MongoClient(MONGO_URI)
-db = mongo.auto_delete_bot
-settings = db.settings
-message_queue = Queue()
+# MongoDB configuration
+connect(db="auto_delete_bot", host=os.environ.get("MONGO_URI"))
 
-# Pyrogram Client
-bot = Client("auto_delete_bot", API_ID, API_HASH, bot_token=BOT_TOKEN)
+# Model for group settings
+class GroupSettings(Document):
+    chat_id = StringField(required=True, unique=True)
+    delete_after_seconds = IntField(default=60)
 
-# Flask Server
-flask_app = Flask(__name__)
-@flask_app.route('/')
-def health_check():
-    return "Bot Operational", 200
+# Pyrogram client setup
+api_id = int(os.environ.get("API_ID"))
+api_hash = os.environ.get("API_HASH")
+bot_token = os.environ.get("BOT_TOKEN")
 
-def run_flask():
-    flask_app.run(host='0.0.0.0', port=8000)
+bot = Client("auto_delete_bot", api_id=api_id, api_hash=api_hash, bot_token=bot_token)
 
-async def deletion_worker():
-    while True:
-        try:
-            chat_id, message_id = message_queue.get()
-            delay = settings.find_one({"chat_id": chat_id})["delay"]
-            
-            await asyncio.sleep(delay)
-            await bot.delete_messages(chat_id, message_id)
-            
-            message_queue.task_done()
-        except Exception as e:
-            print(f"Deletion Error: {e}")
+async def is_admin(chat_id: int, user_id: int) -> bool:
+    try:
+        member = await bot.get_chat_member(chat_id, user_id)
+        return member.status in ["administrator", "creator"]
+    except:
+        return False
+
+@bot.on_message(filters.command(["setdelay"]) & filters.group)
+async def set_delay(client: Client, message: Message):
+    user = message.from_user
+    if not user or not await is_admin(message.chat.id, user.id):
+        await message.reply("Only admins can set deletion delay!")
+        return
+
+    try:
+        delay = int(message.command[1])
+        if delay < 10:
+            raise ValueError("Delay must be at least 10 seconds")
+    except (IndexError, ValueError):
+        await message.reply("Invalid format. Use /setdelay <seconds> (min 10)")
+        return
+
+    GroupSettings.objects(chat_id=str(message.chat.id)).update_one(
+        upsert=True,
+        set__delete_after_seconds=delay
+    )
+    await message.reply(f"Auto-delete delay set to {delay} seconds!")
 
 @bot.on_message(filters.group & ~filters.service)
-async def track_message(_, message: Message):
+async def track_message(client: Client, message: Message):
     try:
-        config = settings.find_one({"chat_id": message.chat.id})
-        if not config or "delay" not in config:
-            return
-        
-        message_queue.put((message.chat.id, message.id))
+        settings = GroupSettings.objects.get(chat_id=str(message.chat.id))
+        delay = settings.delete_after_seconds
+    except GroupSettings.DoesNotExist:
+        delay = 60  # Default delay
+
+    # Schedule message deletion
+    await schedule_deletion(message, delay)
+
+async def schedule_deletion(message: Message, delay: int):
+    await asyncio.sleep(delay)
+    try:
+        await message.delete()
+    except FloodWait as e:
+        await asyncio.sleep(e.value)
+        await message.delete()
     except Exception as e:
-        print(f"Tracking Error: {e}")
+        print(f"Error deleting message: {e}")
 
-@bot.on_message(filters.command("setdelay") & filters.group)
-async def set_delay(_, message: Message):
-    user = await bot.get_chat_member(message.chat.id, message.from_user.id)
-    if user.status not in ("creator", "administrator"):
-        await message.reply("Admin rights required!")
-        return
-    
-    try:
-        delay = max(10, int(message.command[1]))
-        settings.update_one(
-            {"chat_id": message.chat.id},
-            {"$set": {"delay": delay}},
-            upsert=True
-        )
-        await message.reply(f"⏳ Messages will auto-delete after {delay}s")
-    except (IndexError, ValueError):
-        await message.reply("Usage: /setdelay <seconds>")
-
-@bot.on_start
-async def initialize(client):
-    asyncio.create_task(deletion_worker())
+def run_flask():
+    app.run(host='0.0.0.0', port=8000)
 
 if __name__ == "__main__":
-    Thread(target=run_flask, daemon=True).start()
+    flask_thread = Thread(target=run_flask)
+    flask_thread.start()
+    print("Flask server started on port 8000")
+    
     bot.run()
+    print("Bot started")
