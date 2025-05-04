@@ -1,7 +1,6 @@
 import os
 import asyncio
 import threading
-from datetime import datetime, timedelta
 from flask import Flask
 import requests
 from pyrogram import Client, filters, enums
@@ -47,11 +46,14 @@ def ping_server():
             pass
         threading.Event().wait(30)
 
+async def run_client():
+    await bot.start()
+    await bot.idle()
+
 def run_bot():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    loop.run_until_complete(bot.start())
-    loop.run_forever()
+    loop.run_until_complete(run_client())
 
 @bot.on_message(filters.command("start"))
 async def start(client, message: Message):
