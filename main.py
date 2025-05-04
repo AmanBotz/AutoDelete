@@ -1,12 +1,11 @@
 import asyncio
-from pyrogram import Client
 from flask import Flask
 from threading import Thread
 
-from config import API_ID, API_HASH, BOT_TOKEN
+from bot import bot
 from deleter import process_queue
 from pinger import keep_alive
-import handlers
+import handlers  # Important: must be imported AFTER `bot` is created
 
 app = Flask(__name__)
 
@@ -16,8 +15,6 @@ def home():
 
 def run_flask():
     app.run(host="0.0.0.0", port=8000)
-
-bot = Client("autodeleter", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
 async def start_all():
     Thread(target=run_flask).start()
