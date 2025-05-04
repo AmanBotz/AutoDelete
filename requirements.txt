@@ -1,5 +1,5 @@
-pyrogram==2.2.26
-tgcrypto==1.1.1
-flask==2.3.3
-pymongo==4.4.3
-aiohttp==3.8.6
+pyrogram
+tgcrypto
+flask
+pymongo
+aiohttp
