@@ -21,7 +21,7 @@ def default_settings():
 
 app = Flask(__name__)
 
-@app.route("/ping")
+@app.route("/")
 def ping():
     return jsonify({"status": "ok"})
 
@@ -43,8 +43,8 @@ bot = Client(
     api_hash=API_HASH
 )
 
-@bot.on_my_chat_member()
-async def handle_my_chat_member(client: Client, update: ChatMemberUpdated):
+@bot.on_chat_member_updated()
+async def handle_chat_member_updated(client: Client, update: ChatMemberUpdated):
     if update.new_chat_member.user.id == (await client.get_me()).id:
         chat_id = update.chat.id
         perms = await client.get_chat(chat_id)
@@ -131,7 +131,6 @@ async def callbacks(client: Client, cq):
         _, typ, chat_id, unit, _ = data.split(':')
         chat_id = int(chat_id)
         key = 'user_delay' if typ=='u' else 'bot_delay'
-        # For simplicity, treat unit selection as seconds multiplier mapping
         multipliers = {'s':1, 'm':60, 'h':3600, 'd':86400, 'w':604800, 'mo':2592000, 'y':31536000}
         new_val = multipliers.get(unit,1)
         await chats.update_one({"chat_id": chat_id}, {"$set": {key: new_val}})
@@ -143,7 +142,7 @@ async def main():
     loop = asyncio.get_event_loop()
     loop.create_task(ping_loop())
     bot.start()
-    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
 
 if __name__ == '__main__':
     asyncio.run(main())
