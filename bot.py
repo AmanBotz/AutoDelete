@@ -1,6 +1,6 @@
 import os
 import asyncio
-from threading import Thread
+import threading
 from datetime import datetime, timedelta
 from flask import Flask
 import requests
@@ -40,14 +40,18 @@ async def delete_message(chat_id, message_id, delay):
         pass
 
 def ping_server():
-    try:
-        requests.get(PING_URL)
-    except:
-        pass
-    Thread(target=lambda: (
-        threading.Event().wait(30),
-        ping_server()
-    )).start()
+    while True:
+        try:
+            requests.get(PING_URL)
+        except:
+            pass
+        threading.Event().wait(30)
+
+def run_bot():
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(bot.start())
+    loop.run_forever()
 
 @bot.on_message(filters.command("start"))
 async def start(client, message: Message):
@@ -56,10 +60,6 @@ async def start(client, message: Message):
         InlineKeyboardButton("List Chats", callback_data="list_chats")
     ]])
     await message.reply("**Auto-Delete Bot**\nConfigure deletion delays:", reply_markup=keyboard)
-
-@bot.on_message(filters.command("help"))
-async def help(client, message: Message):
-    await message.reply("Configure deletion delays via /settings")
 
 @bot.on_message(filters.command("settings"))
 async def settings(client, message: Message):
@@ -171,6 +171,6 @@ def ping():
     return "PONG"
 
 if __name__ == "__main__":
-    Thread(target=lambda: bot.run()).start()
-    Thread(target=ping_server).start()
+    threading.Thread(target=run_bot, daemon=True).start()
+    threading.Thread(target=ping_server, daemon=True).start()
     app.run(host='0.0.0.0', port=8080)
