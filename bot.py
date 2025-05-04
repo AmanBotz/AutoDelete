@@ -1,208 +1,149 @@
 import os
 import asyncio
-import re
 from threading import Thread
-from pyrogram import Client, filters, enums
+from pyrogram import Client, filters
 from pyrogram.types import (
     InlineKeyboardMarkup,
     InlineKeyboardButton,
     CallbackQuery,
-    ChatMemberUpdated,
-    Message
+    ChatMemberUpdated
 )
 from flask import Flask, request, jsonify
-from pymongo import MongoClient, ASCENDING
-from pymongo.errors import PyMongoError
+from pymongo import MongoClient
 import aiohttp
-from functools import wraps
 
-# Configuration
+# Environment
 API_ID = int(os.getenv("API_ID"))
-API_HASH = os.getenv("API_HASH"))
-BOT_TOKEN = os.getenv("BOT_TOKEN"))
-MONGO_URI = os.getenv("MONGO_URI"))
-PING_URL = os.getenv("PING_URL"))
-PING_INTERVAL = int(os.getenv("PING_INTERVAL", 30)))
-SECRET_KEY = os.getenv("SECRET_KEY", "default-secret")
+API_HASH = os.getenv("API_HASH")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+MONGO_URI = os.getenv("MONGO_URI")
+PING_URL = os.getenv("PING_URL")
+PING_INTERVAL = int(os.getenv("PING_INTERVAL", 30))
 
-# Database setup
+# MongoDB
 mongo = MongoClient(MONGO_URI)
-db = mongo['auto_delete_pro']
+db = mongo['auto_delete_bot']
 settings_col = db['settings']
 chats_col = db['chats']
-user_ctx_col = db['user_context']
+user_ctx = db['user_context']
 
-# Create indexes
-settings_col.create_index([("_id", ASCENDING)])
-chats_col.create_index([("_id", ASCENDING)])
-
-app = Client("auto_delete_pro", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+# Pyrogram & Flask
+app = Client("auto_delete_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 server = Flask(__name__)
-server.secret_key = SECRET_KEY
 
-# Helpers
+def get_settings(chat_id: str):
+    doc = settings_col.find_one({"_id": chat_id})
+    return {"user": doc.get("user", 0), "bot": doc.get("bot", 0)} if doc else {"user": 0, "bot": 0}
+
+def set_settings(chat_id: str, user_delay=None, bot_delay=None):
+    update = {}
+    if user_delay is not None: update['user'] = user_delay
+    if bot_delay is not None: update['bot'] = bot_delay
+    settings_col.update_one({"_id": chat_id}, {"$set": update}, upsert=True)
+
 def parse_delay(text: str) -> int:
-    if not re.match(r"^\d+[smhd]$", text):
-        raise ValueError("Invalid format. Use <number><s|m|h|d>")
-    units = {"s": 1, "m": 60, "h": 3600, "d": 86400}
-    return int(text[:-1]) * units[text[-1]]
+    num = int(text[:-1])
+    unit = text[-1]
+    if unit == 's': return num
+    if unit == 'm': return num * 60
+    if unit == 'h': return num * 3600
+    if unit == 'd': return num * 86400
+    if unit == 'w': return num * 7 * 86400
+    if unit == 'M': return num * 30 * 86400
+    if unit == 'y': return num * 365 * 86400
+    raise ValueError
 
-async def is_admin(chat_id: int, user_id: int) -> bool:
-    try:
-        member = await app.get_chat_member(chat_id, user_id)
-        return member.status in [enums.ChatMemberStatus.ADMINISTRATOR, enums.ChatMemberStatus.OWNER]
-    except Exception:
-        return False
-
-def protected(endpoint):
-    @wraps(endpoint)
-    def wrapper(*args, **kwargs):
-        if request.headers.get('X-API-KEY') != SECRET_KEY:
-            return jsonify({"error": "Unauthorized"}), 401
-        return endpoint(*args, **kwargs)
-    return wrapper
-
-# Database operations
-async def get_chat_settings(chat_id: int):
-    try:
-        doc = settings_col.find_one({"_id": str(chat_id)})
-        return doc or {"user": 0, "bot": 0, "exclude": []}
-    except PyMongoError:
-        return {"user": 0, "bot": 0, "exclude": []}
-
-async def update_chat_settings(chat_id: int, update: dict):
-    try:
-        settings_col.update_one(
-            {"_id": str(chat_id)},
-            {"$set": update},
-            upsert=True
-        )
-    except PyMongoError as e:
-        print(f"MongoDB error: {e}")
-
-# Handlers
 @app.on_message(filters.command("start") & filters.private)
-async def start_handler(client: Client, message: Message):
+async def start_cmd(c, m):
+    bot = await c.get_me()
     buttons = [
-        [InlineKeyboardButton("📋 List Managed Chats", callback_data="list_chats")],
-        [InlineKeyboardButton("⚙ Bot Documentation", url="https://example.com/docs")]
+        [InlineKeyboardButton("➕ Add to a Group", url=f"https://t.me/{bot.username}?startgroup=true")],
+        [InlineKeyboardButton("➕ Add to a Channel", url=f"https://t.me/{bot.username}?startchannel=true")],
+        [InlineKeyboardButton("📋 List my Chats", callback_data="listchats")]
     ]
-    await message.reply(
-        "🤖 **AutoDelete Pro**\n\n"
-        "Configure automatic message deletion for your groups/channels.\n"
-        "- Set different delays for users and bots\n"
-        "- Exclude specific users from deletion\n"
-        "- Cloud-controlled settings\n\n"
-        "Use buttons below to manage your chats:",
-        reply_markup=InlineKeyboardMarkup(buttons)
+    text = (
+        "👋 Welcome! I'm AutoDelete Bot.\n"
+        "• I remove user and bot messages after a delay you set.\n"
+        "• Supported units: s=seconds, m=minutes, h=hours, d=days, w=weeks, M=months, y=years.\n"
+        "• In private chat, list and select a chat via the button, then configure with /setdelay_user or /setdelay_bot."
     )
+    await m.reply(text, reply_markup=InlineKeyboardMarkup(buttons))
 
-@app.on_callback_query(filters.regex(r"^list_chats$"))
-async def list_chats_handler(client: Client, callback: CallbackQuery):
-    user_id = callback.from_user.id
-    try:
-        chats = list(chats_col.find({"admins": user_id}))
-        buttons = []
-        for chat in chats:
-            btn = InlineKeyboardButton(
-                chat.get('title', chat['_id']),
-                callback_data=f"manage_{chat['_id']}"
-            )
-            buttons.append([btn])
-        
-        await callback.edit_message_text(
-            "Select a chat to manage:",
-            reply_markup=InlineKeyboardMarkup(buttons)
-        )
-    except Exception as e:
-        await callback.answer("Error fetching chats", show_alert=True)
-
-@app.on_callback_query(filters.regex(r"^manage_(\-?\d+)$"))
-async def manage_chat_handler(client: Client, callback: CallbackQuery):
-    chat_id = int(callback.matches[0].group(1))
-    user_id = callback.from_user.id
-    
-    if not await is_admin(chat_id, user_id):
-        return await callback.answer("You must be an admin in this chat", show_alert=True)
-    
-    settings = await get_chat_settings(chat_id)
-    buttons = [
-        [InlineKeyboardButton(f"User Delay: {settings['user']}s", callback_data=f"set_user_{chat_id}")],
-        [InlineKeyboardButton(f"Bot Delay: {settings['bot']}s", callback_data=f"set_bot_{chat_id}")],
-        [InlineKeyboardButton("Exclude Users", callback_data=f"exclude_{chat_id}")]
-    ]
-    await callback.edit_message_text(
-        f"⚙ Managing Chat ID: {chat_id}\n"
-        "Configure deletion settings:",
-        reply_markup=InlineKeyboardMarkup(buttons)
-    )
-
-@app.on_message(filters.group | filters.channel & ~filters.service)
-async def message_handler(client: Client, message: Message):
-    chat_id = message.chat.id
-    settings = await get_chat_settings(chat_id)
-    
-    if message.from_user and message.from_user.id in settings.get("exclude", []):
-        return
-    
-    delay = settings["bot"] if (message.from_user and message.from_user.is_bot) else settings["user"]
-    
-    if delay > 0:
-        asyncio.create_task(delete_message(message, delay))
-
-async def delete_message(message: Message, delay: int):
-    try:
-        await asyncio.sleep(delay)
-        await message.delete()
-    except Exception as e:
-        print(f"Error deleting message: {e}")
-
-# Flask endpoints
-@server.route('/ping', methods=['POST'])
-@protected
-def ping():
-    return jsonify({"status": "OK", "interval": PING_INTERVAL})
-
-@server.route('/broadcast', methods=['POST'])
-@protected
-def broadcast():
-    data = request.json
-    message = data.get("message")
-    
-    async def _broadcast():
-        for chat in chats_col.find():
+@app.on_chat_member()
+async def on_my_chat_member(c, chat_member: ChatMemberUpdated):
+    if chat_member.new_chat_member.status in ["member", "administrator"]:
+        chat_id = str(chat_member.chat.id)
+        title = chat_member.chat.title or chat_member.chat.username or chat_id
+        chats_col.update_one({"_id": chat_id}, {"$set": {"title": title, "username": chat_member.chat.username}}, upsert=True)
+        button = InlineKeyboardMarkup([[InlineKeyboardButton("⚙ Configure this chat", callback_data=f"select_{chat_id}")]])
+        await c.send_message(chat_id, f"🤖 I've been added to **{title}**. Configure delays now:", reply_markup=button, parse_mode="Markdown")
+        adder = chat_member.from_user
+        if adder:
             try:
-                await app.send_message(chat['_id'], message)
-            except Exception:
-                continue
-    asyncio.run_coroutine_threadsafe(_broadcast(), app.loop)
-    return jsonify({"status": "Broadcast started"})
+                await c.send_message(adder.id, f"👋 You added me to **{title}**. Use 'List my Chats' in /start to configure.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📋 List my Chats", callback_data="listchats")]]), parse_mode="Markdown")
+            except:
+                pass
 
-# System tasks
-async def ping_task():
-    while True:
-        try:
-            async with aiohttp.ClientSession() as session:
-                await session.get(PING_URL)
-        except Exception:
-            pass
-        await asyncio.sleep(PING_INTERVAL)
+@app.on_callback_query()
+async def handle_cb(c, cb: CallbackQuery):
+    data = cb.data; user_id = str(cb.from_user.id)
+    if data == "listchats":
+        chats = list(chats_col.find({}))
+        if not chats:
+            return await cb.answer("No chats found. Send a message in your group/channel.", show_alert=True)
+        kb = [[InlineKeyboardButton(ch.get('title') or ch['_id'], callback_data=f"select_{ch['_id']}")] for ch in chats]
+        await cb.message.edit("Select a chat to configure:", reply_markup=InlineKeyboardMarkup(kb))
+    elif data.startswith("select_"):
+        chat_id = data.split("_")[1]
+        user_ctx.update_one({"_id": user_id}, {"$set": {"chat_id": chat_id}}, upsert=True)
+        await cb.message.edit(f"✅ Selected chat: **{chat_id}**\nNow send /setdelay_user or /setdelay_bot in this private chat.", parse_mode="Markdown")
 
-def run_flask():
-    server.run(host='0.0.0.0', port=int(os.getenv("PORT", 5000)), use_reloader=False)
+@app.on_message(filters.command(["setdelay_user", "setdelay_bot"]) & filters.private)
+async def set_delay_pm(c, m):
+    user_id = str(m.from_user.id)
+    ctx = user_ctx.find_one({"_id": user_id})
+    if not ctx or 'chat_id' not in ctx:
+        return await m.reply("⚠️ No chat selected. Tap 'List my Chats' first.", parse_mode="Markdown")
+    chat_id = ctx['chat_id']; cmd = m.command[0]; arg = m.command[1] if len(m.command)>1 else None
+    try: delay = parse_delay(arg)
+    except: return await m.reply(f"🚫 Invalid. Usage: /{cmd} <number><unit>, e.g. /{cmd} 2w")
+    if cmd=="setdelay_user": set_settings(chat_id, user_delay=delay)
+    else: set_settings(chat_id, bot_delay=delay)
+    await m.reply(f"✅ `{cmd}` for **{chat_id}**: delete after {arg}.", parse_mode="Markdown")
 
-async def main():
-    await app.start()
-    asyncio.create_task(ping_task())
-    Thread(target=run_flask, daemon=True).start()
-    await idle()
+async def schedule_deletion(c, m, delay):
+    await asyncio.sleep(delay)
+    try: await c.delete_messages(chat_id=m.chat.id, message_ids=m.message_id)
+    except: pass
+
+@app.on_message(filters.group | filters.channel)
+async def auto_delete(c, m):
+    chats_col.update_one({"_id": str(m.chat.id)}, {"$set": {"title": m.chat.title, "username": m.chat.username}}, upsert=True)
+    conf = get_settings(str(m.chat.id))
+    delay = conf['bot'] if m.from_user and m.from_user.is_bot else conf['user']
+    if delay>0: asyncio.create_task(schedule_deletion(c, m, delay))
+
+@server.route('/set_ping', methods=['POST'])
+def set_ping():
+    data = request.json or {}
+    global PING_URL, PING_INTERVAL
+    if 'url' in data: PING_URL = data['url']
+    if 'interval' in data: PING_INTERVAL = int(data['interval'])
+    return jsonify({"PING_URL": PING_URL, "PING_INTERVAL": PING_INTERVAL})
+
+def start_ping_loop():
+    async def loop():
+        async with aiohttp.ClientSession() as session:
+            while True:
+                try: await session.get(PING_URL)
+                except: pass
+                await asyncio.sleep(PING_INTERVAL)
+    asyncio.get_event_loop().create_task(loop())
+
+def start_flask():
+    server.run(host='0.0.0.0', port=int(os.getenv('PORT', 5000)))
 
 if __name__ == '__main__':
-    loop = asyncio.get_event_loop()
-    try:
-        loop.run_until_complete(main())
-    except KeyboardInterrupt:
-        pass
-    finally:
-        loop.run_until_complete(app.stop())
-        mongo.close()
+    start_ping_loop()
+    Thread(target=start_flask, daemon=True).start()
+    app.run()
