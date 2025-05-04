@@ -1,8 +1,8 @@
-fastapi>=0.95.0
-uvicorn[standard]>=0.22.0
-pyrogram>=2.0.0
-tgcrypto>=1.2.1
-motor>=4.4.0
-apscheduler>=3.11.0
-httpx>=0.24.1
-python-dotenv>=1.0.0
+fastapi
+uvicorn[standard]
+pyrogram
+tgcrypto
+motor
+apscheduler
+httpx
+python-dotenv
