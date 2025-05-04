@@ -52,7 +52,5 @@ async def delete_later(c, m):
 
 if __name__ == "__main__":
     threading.Thread(target=lambda: flask_app.run(host="0.0.0.0", port=8000)).start()
-    async def main():
-        asyncio.create_task(ping())
-        await app.run()
-    asyncio.run(main())
+    asyncio.get_event_loop().create_task(ping())
+    app.run()
