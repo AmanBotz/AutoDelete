@@ -31,7 +31,7 @@ async def is_admin(chat_id, user_id):
 
 @app.on_message(filters.command("start") & filters.private)
 async def start(c, m):
-    await m.reply("Hello! I'm Auto Deleter Bot.\n\nAdd me to your group as admin and use /setdelay <seconds> to control how long messages stay.")
+    await m.reply("Hello! I'm Auto Deleter Bot.\n\nAdd me to your group as admin and use /setdelay <seconds>.")
 
 @app.on_message(filters.command("setdelay") & filters.group)
 async def set_delay(c, m):
@@ -52,4 +52,7 @@ async def delete_later(c, m):
 
 if __name__ == "__main__":
     threading.Thread(target=lambda: flask_app.run(host="0.0.0.0", port=8000)).start()
-    asyncio.run(asyncio.gather(app.start(), ping(), app.idle()))
+    async def main():
+        asyncio.create_task(ping())
+        await app.run()
+    asyncio.run(main())
