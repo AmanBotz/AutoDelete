@@ -1,11 +1,13 @@
 import os
 import time
 import threading
+import asyncio
 from flask import Flask
 from pyrogram import Client, filters
+from pyrogram.enums import ChatMembersFilter
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
 from pymongo import MongoClient
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 API_ID = int(os.getenv("API_ID", "YOUR_API_ID"))
 API_HASH = os.getenv("API_HASH", "YOUR_API_HASH")
@@ -40,13 +42,24 @@ def pinger():
 
 @app.on_message(filters.private & filters.command("start"))
 async def start(client, message: Message):
-    users_col.update_one({"_id": message.from_user.id}, {"$set": {"last_seen": datetime.utcnow()}}, upsert=True)
+    users_col.update_one(
+        {"_id": message.from_user.id},
+        {"$set": {"last_seen": datetime.now(timezone.utc)}},
+        upsert=True,
+    )
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("➕ Add me to Group", url=f"https://t.me/{client.me.username}?startgroup=start")],
         [InlineKeyboardButton("➕ Add me to Channel", url=f"https://t.me/{client.me.username}?startchannel=start")],
         [InlineKeyboardButton("📂 List My Chats", callback_data="list_chats")]
     ])
-    await message.reply("Welcome! I can auto-delete messages from any group or channel after a delay. First, add me and give **Delete Messages** permission.", reply_markup=kb)
+    await message.reply(
+        "Welcome to Auto-Delete Bot!\n\n"
+        "• Add me to any group or channel.\n"
+        "• Give me **Delete Messages** permission.\n"
+        "• Then open this chat to configure auto-delete delays.\n\n"
+        "Everything works with **buttons only** — no commands required.",
+        reply_markup=kb
+    )
 
 @app.on_callback_query(filters.regex("list_chats"))
 async def list_chats(client, cb):
@@ -120,7 +133,11 @@ async def on_added(client, update):
     if update.new_chat_member and update.new_chat_member.user.id == client.me.id:
         chat = await client.get_chat(update.chat.id)
         title = chat.title or "Unknown"
-        admins = [m.user.id async for m in client.get_chat_members(chat.id, filter="administrators") if m.status == "administrator"]
+        admins = [
+            m.user.id async for m in client.get_chat_members(
+                chat.id, filter=ChatMembersFilter.ADMINISTRATORS
+            ) if m.status == "administrator"
+        ]
         chats_col.update_one({"_id": chat.id}, {"$set": {"title": title, "admins": admins}}, upsert=True)
         try:
             await client.send_message(chat.id, "Thanks for adding me! Please give me 'Delete messages' permission.")
