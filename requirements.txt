@@ -1,4 +1,4 @@
-pyrogram==2.0.106
-flask==2.2.5
-mongoengine==0.27.0
-python-dotenv==1.0.0
+pyrogram
+tgcrypto
+motor
+flask
