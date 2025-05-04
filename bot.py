@@ -3,7 +3,7 @@ import asyncio
 import threading
 import requests
 from flask import Flask
-from pyrogram import Client, filters, enums
+from pyrogram import Client, idle, filters, enums
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from motor.motor_asyncio import AsyncIOMotorClient
 
@@ -41,7 +41,8 @@ def ping_server():
 
 async def run_client():
     await bot.start()
-    await bot.idle()
+    await idle()
+    await bot.stop()
 
 def run_bot():
     loop = asyncio.new_event_loop()
