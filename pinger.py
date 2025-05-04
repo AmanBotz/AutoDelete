@@ -8,6 +8,7 @@ async def keep_alive():
             try:
                 async with aiohttp.ClientSession() as session:
                     await session.get(PING_URL)
+                    print("Pinged URL")
             except Exception as e:
-                print(f"Ping failed: {e}")
+                print("Ping failed:", e)
         await asyncio.sleep(30)
